@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Starts QuasselPage; if it is already running, just opens the browser.
+cd "$(dirname "$(readlink -f "$0")")/.."
+PORT="${QUASSELPAGE_PORT:-8743}"
+if curl -s -o /dev/null "http://127.0.0.1:$PORT/api/status"; then
+  exec xdg-open "http://127.0.0.1:$PORT/"
+fi
+exec .venv/bin/python -m quasselpage --port "$PORT" "$@"

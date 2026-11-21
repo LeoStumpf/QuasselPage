@@ -1,0 +1,27 @@
+[project]
+name = "quasselpage"
+version = "0.1.0"
+description = "Local, offline read-aloud app for PDFs and web pages: click a sentence to listen, follow the highlight while listening"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi", "uvicorn[standard]", "python-multipart", "pymupdf", "trafilatura", "httpx",
+  "platformdirs", "pysbd", "pysocks", "soundfile", "kittenml==0.9.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+quasselpage = "quasselpage.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["quasselpage"]

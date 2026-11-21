@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reader – QuasselPage</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="reader">
+  <header class="topbar">
+    <a class="back" href="/" title="Zur Bibliothek"><button class="icon">←</button></a>
+    <div class="title" id="title">…</div>
+    <span class="grp opt" id="zoomgrp">
+      <button class="icon" id="zout" title="Verkleinern (−)">−</button>
+      <button class="icon" id="zin" title="Vergrößern (+)">+</button>
+    </span>
+    <label class="opt muted" title="Beim Vorlesen automatisch mitscrollen"><input type="checkbox" id="autoscroll"> mitscrollen</label>
+    <button class="icon opt" id="pdfdark" title="PDF dunkel darstellen">◐</button>
+    <select id="voice" title="Stimme"></select>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+  <div class="view" id="view"></div>
+  <button class="follow" id="follow">↓ Zur aktuellen Stelle</button>
+  <footer class="player">
+    <span class="grp">
+      <button class="icon" id="back15" title="15 s zurück">−15</button>
+      <button class="icon" id="prev" title="Vorheriger Satz (←)">⏮</button>
+      <button class="primary play" id="play" title="Abspielen/Pause (Leertaste)">▶</button>
+      <button class="icon" id="next" title="Nächster Satz (→)">⏭</button>
+      <button class="icon" id="fwd15" title="15 s vor">+15</button>
+    </span>
+    <select id="rate" title="Tempo">
+      <option value="0.75">0,75×</option><option value="0.9">0,9×</option><option value="1" selected>1×</option>
+      <option value="1.1">1,1×</option><option value="1.25">1,25×</option><option value="1.5">1,5×</option>
+      <option value="1.75">1,75×</option><option value="2">2×</option>
+    </select>
+    <span class="state" id="state"></span>
+  </footer>
+</div>
+<script type="module" src="/static/reader.js"></script>
+</body>
+</html>

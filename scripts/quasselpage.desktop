@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=QuasselPage
+Comment=PDFs und Webseiten lokal vorlesen lassen
+Exec=@REPO@/scripts/quasselpage
+Icon=audio-x-generic
+Terminal=false
+Categories=Office;Viewer;AudioVideo;
