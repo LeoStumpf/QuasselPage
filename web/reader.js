@@ -418,6 +418,263 @@ const webView = {
   },
 };
 
+// ----------------------------------------------------------------- original web page view
+// Shows the stored original page in a sandboxed iframe (no scripts) and maps the extracted
+// sentences onto its text nodes, so highlighting and click-to-play work on the real layout.
+const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "TEXTAREA", "SELECT", "OPTION", "SVG", "MATH"]);
+const IGNORABLE = /[\s­​-‍⁠﻿]/;
+
+const origView = {
+  frame: null, doc: null, win: null, segs: [], order: [], coverage: 0, hovSid: -1,
+
+  async init() {
+    const url = `/api/docs/${docId}/original.html`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+    view.classList.add("framed");
+    const f = document.createElement("iframe");
+    f.setAttribute("sandbox", "allow-same-origin");
+    f.title = "Originalseite";
+    const loaded = new Promise((res) => { f.onload = res; setTimeout(res, 15000); });
+    f.src = url;
+    view.appendChild(f);
+    await loaded;
+    this.frame = f; this.doc = f.contentDocument; this.win = f.contentWindow;
+    if (!this.doc?.body) throw new Error("Seite nicht lesbar");
+    if (!this.win.CSS?.highlights || !this.win.Highlight) throw new Error("Browser kann keine Text-Markierungen");
+    this.align();
+    if (this.coverage < 0.5) throw new Error(`nur ${Math.round(this.coverage * 100)} % der Sätze im Original gefunden`);
+
+    const st = this.doc.createElement("style");
+    st.textContent = "::highlight(qp-cur){background-color:rgba(232,176,75,.55);color:inherit}"
+      + "::highlight(qp-hov){background-color:rgba(14,107,85,.16)}";
+    this.doc.head.appendChild(st);
+
+    const d = this.doc;
+    d.addEventListener("click", (e) => this.click(e), true);
+    d.addEventListener("auxclick", (e) => {
+      const a = e.target.closest?.("a[href]");
+      if (a && e.button === 1) { e.preventDefault(); openExternal(a.href); }
+    }, true);
+    let raf = 0, last = null;
+    d.addEventListener("mousemove", (e) => {
+      last = e;
+      if (!raf) raf = requestAnimationFrame(() => { raf = 0; this.hover(last); });
+    });
+    d.addEventListener("mouseleave", () => this.clearHover());
+    ["wheel", "touchmove"].forEach((ev) => d.addEventListener(ev, () => stopFollowing(), { passive: true }));
+    d.addEventListener("keydown", onKey);
+    $("#zoomgrp").hidden = true;
+    $("#pdfdark").hidden = true;
+    this.buildToc();
+  },
+
+  // ---- text stream of the page: non-whitespace characters, each mapped back to (node, offset)
+  stream(root) {
+    const nodes = [], nodeIdx = new Map();
+    let chars = "";
+    const nOf = [], oOf = [];
+    const walker = this.doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        for (let el = n.parentElement; el && el !== root.parentElement; el = el.parentElement) {
+          if (SKIP.has(el.tagName.toUpperCase()) || el.hidden || el.getAttribute("aria-hidden") === "true") return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const parts = [];
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      const i = nodes.length;
+      nodes.push(n); nodeIdx.set(n, i);
+      const t = n.data;
+      for (let k = 0; k < t.length; k++) {
+        const c = t[k];
+        if (IGNORABLE.test(c)) continue;
+        const norm = c.charCodeAt(0) < 128 ? c : c.normalize("NFKC");
+        for (const ch of norm) {
+          if (IGNORABLE.test(ch)) continue;
+          parts.push(ch); nOf.push(i); oOf.push(k);
+        }
+      }
+    }
+    chars = parts.join("");
+    return { root, nodes, nodeIdx, chars, nOf, oOf };
+  },
+
+  align() {
+    const key = (t) => t.normalize("NFKC").replace(/[\s­​-‍⁠﻿]/g, "");
+    const keys = sentences.map((s) => key(s.text));
+    // find the element holding the article: common ancestor of the first and last long sentence
+    let S = this.stream(this.doc.body);
+    const longs = keys.map((k, i) => [k, i]).filter(([k]) => k.length >= 40);
+    if (longs.length) {
+      const a = S.chars.indexOf(longs[0][0]);
+      const b = S.chars.lastIndexOf(longs[longs.length - 1][0]);
+      if (a >= 0 && b >= a) {
+        const r = this.doc.createRange();
+        r.setStart(S.nodes[S.nOf[a]], 0);
+        r.setEnd(S.nodes[S.nOf[b]], 0);
+        let root = r.commonAncestorContainer;
+        if (root.nodeType !== 1) root = root.parentElement;
+        // include a heading/title directly above the article container
+        if (root.parentElement && root !== this.doc.body && root.parentElement.children.length <= 4) root = root.parentElement;
+        S = this.stream(root);
+      }
+    }
+    this.S = S;
+    const WINDOW = 40000;
+    let cur = 0, found = 0;
+    this.segs = new Array(sentences.length).fill(null);
+    for (let sid = 0; sid < keys.length; sid++) {
+      const k = keys[sid];
+      if (!k) continue;
+      let a = S.chars.indexOf(k, cur), b = a + k.length;
+      if (a < 0 || a - cur > WINDOW) {
+        // tolerate small differences: anchor on the beginning and the end of the sentence
+        const n = Math.min(16, k.length);
+        a = S.chars.indexOf(k.slice(0, n), cur);
+        if (a < 0 || a - cur > WINDOW) continue;
+        const tail = k.slice(-n);
+        const e = S.chars.indexOf(tail, a + Math.max(0, k.length - n - 40));
+        b = e >= 0 && e - a < k.length * 1.5 + 40 ? e + n : a + k.length;
+      }
+      const range = this.doc.createRange();
+      range.setStart(S.nodes[S.nOf[a]], S.oOf[a]);
+      range.setEnd(S.nodes[S.nOf[b - 1]], S.oOf[b - 1] + 1);
+      this.segs[sid] = { a, b, range };
+      cur = b;
+      found++;
+    }
+    this.coverage = keys.length ? found / keys.length : 0;
+    this.order = this.segs.map((g, sid) => g && { sid, a: g.a, b: g.b }).filter(Boolean);
+  },
+
+  // stream index of a DOM position (node + offset); -1 if outside the article
+  posOf(node, offset) {
+    const S = this.S;
+    const i = S.nodeIdx.get(node);
+    if (i == null) return -1;
+    let lo = 0, hi = S.nOf.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (S.nOf[m] < i || (S.nOf[m] === i && S.oOf[m] < offset)) lo = m + 1; else hi = m;
+    }
+    return lo;
+  },
+
+  sidAtPos(p) {
+    if (p < 0) return null;
+    let lo = 0, hi = this.order.length - 1, best = null;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      if (this.order[m].a <= p) { best = this.order[m]; lo = m + 1; } else hi = m - 1;
+    }
+    return best && p < best.b + 1 ? best.sid : null;
+  },
+
+  sidAtPoint(x, y) {
+    const d = this.doc;
+    let node, off;
+    if (d.caretPositionFromPoint) {
+      const c = d.caretPositionFromPoint(x, y);
+      node = c?.offsetNode; off = c?.offset;
+    } else if (d.caretRangeFromPoint) {
+      const c = d.caretRangeFromPoint(x, y);
+      node = c?.startContainer; off = c?.startOffset;
+    }
+    if (!node || node.nodeType !== 3) return null;
+    const sid = this.sidAtPos(this.posOf(node, off));
+    if (sid == null) return null;
+    // caret APIs snap to the nearest text; make sure the pointer is really over the sentence
+    for (const r of this.segs[sid].range.getClientRects()) {
+      if (x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 3 && y <= r.bottom + 3) return sid;
+    }
+    return null;
+  },
+
+  click(e) {
+    if (e.button !== 0) return;
+    const a = e.target.closest?.("a[href]");
+    if (a && (e.ctrlKey || e.metaKey || e.shiftKey)) { e.preventDefault(); openExternal(a.href); return; }
+    const sid = this.sidAtPoint(e.clientX, e.clientY);
+    if (sid != null) {
+      e.preventDefault();
+      if (this.doc.getSelection()?.toString()) return;   // allow selecting text
+      follow = true; updateFollow(); player.playFrom(sid);
+      return;
+    }
+    if (a) {
+      e.preventDefault();
+      const href = a.getAttribute("href") || "";
+      if (href.startsWith("#")) {
+        const t = this.doc.getElementById(decodeURIComponent(href.slice(1))) || this.doc.getElementsByName(href.slice(1))[0];
+        if (t) { stopFollowing(true); t.scrollIntoView({ behavior: "smooth", block: "start" }); }
+      } else {
+        openExternal(a.href);
+      }
+    }
+  },
+
+  hover(e) {
+    const sid = this.sidAtPoint(e.clientX, e.clientY);
+    this.doc.documentElement.style.cursor = sid != null ? "pointer" : "";
+    if (sid === this.hovSid) return;
+    this.hovSid = sid ?? -1;
+    if (sid != null && sid !== player.sid) this.win.CSS.highlights.set("qp-hov", new this.win.Highlight(this.segs[sid].range));
+    else this.win.CSS.highlights.delete("qp-hov");
+  },
+
+  clearHover() {
+    this.hovSid = -1;
+    this.win?.CSS.highlights.delete("qp-hov");
+    if (this.doc) this.doc.documentElement.style.cursor = "";
+  },
+
+  show(sid) {
+    this.clearHover();
+    const g = this.segs[sid];
+    if (g) this.win.CSS.highlights.set("qp-cur", new this.win.Highlight(g.range));
+    else this.win.CSS.highlights.delete("qp-cur");
+  },
+
+  ensureVisible(sid, smooth = true) {
+    const g = this.segs[sid];
+    if (!g) return;
+    const rect = g.range.getBoundingClientRect();
+    const h = this.win.innerHeight;
+    if (rect.top >= h * 0.12 && rect.top <= h * 0.72) return;
+    const se = this.doc.scrollingElement;
+    if (se && se.scrollHeight > se.clientHeight + 1) {
+      this.win.scrollBy({ top: rect.top - h * 0.3, behavior: smooth ? "smooth" : "auto" });
+    } else {
+      g.range.startContainer.parentElement?.scrollIntoView({ block: "center", behavior: smooth ? "smooth" : "auto" });
+    }
+  },
+
+  buildToc() {
+    const items = [];
+    for (const h of this.S.root.querySelectorAll("h1, h2, h3")) {
+      const w = this.doc.createTreeWalker(h, NodeFilter.SHOW_TEXT);
+      const first = w.nextNode();
+      if (!first) continue;
+      const p = this.posOf(first, 0);
+      const next = this.order.find((o) => o.b > p);
+      if (!next) continue;
+      const title = h.textContent.replace(/[¶#🔗]\s*$/u, "").trim();
+      if (title) items.push({ title, depth: Math.max(0, +h.tagName[1] - 1), sid: next.sid, page: null });
+    }
+    if (items.length > 1) {
+      const minDepth = Math.min(...items.map((i) => i.depth));
+      items.forEach((i) => { i.depth -= minDepth; });
+      setToc(items);
+    }
+  },
+};
+
+function openExternal(href) {
+  if (/^https?:/i.test(href)) window.open(href, "_blank", "noopener,noreferrer");
+}
+
 // ----------------------------------------------------------------- table of contents
 function setToc(items) {
   toc = items;
@@ -483,6 +740,7 @@ function jumpTo(sid) {
 let view_;
 
 function scrollToSentence(sid, smooth = true) {
+  if (view_.ensureVisible) return view_.ensureVisible(sid, smooth);
   const y = view_.offsetOf(sid);
   const top = view.scrollTop, h = view.clientHeight;
   if (y < top + h * 0.12 || y > top + h * 0.72) {
@@ -500,6 +758,16 @@ function stopFollowing(force = false) {
 ["wheel", "touchmove"].forEach((ev) => view.addEventListener(ev, () => stopFollowing(), { passive: true }));
 view.addEventListener("mousedown", (e) => { if (e.target === view) stopFollowing(); }); // scrollbar drag
 $("#follow").onclick = () => { follow = true; updateFollow(); scrollToSentence(player.sid); };
+
+function onKey(e) {
+  if (!player || e.target.closest?.("input, select, textarea, [contenteditable]") || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === " ") { e.preventDefault(); follow = true; player.toggle(); }
+  else if (e.key === "ArrowRight") { e.preventDefault(); player.next(); }
+  else if (e.key === "ArrowLeft") { e.preventDefault(); player.prev(); }
+  else if ((e.key === "+" || e.key === "=") && mode === "pdf") pdfView.setZoom(pdfView.zoom * 1.15);
+  else if (e.key === "-" && mode === "pdf") pdfView.setZoom(pdfView.zoom / 1.15);
+  else if (["PageDown", "PageUp", "ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) stopFollowing();
+}
 
 let posTimer = null;
 function savePosition(sid) {
@@ -591,8 +859,29 @@ async function main() {
   document.documentElement.dataset.pdfdark = dark ? "1" : "0";
 
   player = new Player(docId, sentences, { voice: settings.voice, rate: settings.rate });
-  view_ = mode === "pdf" ? pdfView : webView;
-  await view_.init(doc);
+  const canOriginal = mode !== "pdf" && !!meta.url;
+  const wantOriginal = canOriginal && store.get("quasselpage.webview", "original") === "original";
+  if (canOriginal) {
+    $("#viewmode").hidden = false;
+    document.querySelectorAll("#viewmode button").forEach((b) => {
+      b.setAttribute("aria-pressed", String((b.dataset.v === "original") === wantOriginal));
+      b.onclick = () => { store.set("quasselpage.webview", b.dataset.v); location.reload(); };
+    });
+  }
+  view_ = mode === "pdf" ? pdfView : wantOriginal ? origView : webView;
+  try {
+    await view_.init(doc);
+  } catch (e) {
+    if (view_ !== origView) throw e;
+    console.warn("Originalansicht nicht möglich:", e);
+    const b = $("#banner");
+    b.hidden = false;
+    b.textContent = `Originalansicht nicht möglich (${e.message}) – es wird die Lesefassung gezeigt.`;
+    view.classList.remove("framed");
+    view.innerHTML = "";
+    view_ = webView;
+    await view_.init(doc);
+  }
 
   player.addEventListener("sentence", (e) => {
     const sid = e.detail;
@@ -634,15 +923,7 @@ async function main() {
     store.set("quasselpage.pdfdark", on ? "1" : "0");
   };
 
-  document.addEventListener("keydown", (e) => {
-    if (e.target.closest("input, select, textarea") || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === " ") { e.preventDefault(); follow = true; player.toggle(); }
-    else if (e.key === "ArrowRight") { e.preventDefault(); player.next(); }
-    else if (e.key === "ArrowLeft") { e.preventDefault(); player.prev(); }
-    else if ((e.key === "+" || e.key === "=") && mode === "pdf") pdfView.setZoom(pdfView.zoom * 1.15);
-    else if (e.key === "-" && mode === "pdf") pdfView.setZoom(pdfView.zoom / 1.15);
-    else if (["PageDown", "PageUp", "ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) stopFollowing();
-  });
+  document.addEventListener("keydown", onKey);
 
   if ("mediaSession" in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({ title: meta.title, artist: "QuasselPage" });

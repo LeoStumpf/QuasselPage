@@ -134,6 +134,26 @@ def create_app(library: Library | None = None, start_renderer: bool = True) -> F
             raise HTTPException(404)
         return FileResponse(p, media_type="text/html; charset=utf-8")
 
+    @app.get("/api/docs/{doc_id}/original.html")
+    def original_html(doc_id: str):
+        """The original web page (stylesheets inlined, scripts removed) for the sandboxed viewer.
+        Documents imported before this existed fetch it once on first use."""
+        meta = need(doc_id)
+        p = lib.dir(doc_id) / "original.html"
+        if not p.exists():
+            if not meta.get("url"):
+                raise HTTPException(404, "kein Original vorhanden")
+            try:
+                p.write_text(extract_web.fetch_original(meta["url"]), encoding="utf-8")
+            except Exception as e:
+                raise HTTPException(502, f"Original konnte nicht geladen werden: {e}")
+        html = extract_web.prepare_original(p.read_text(encoding="utf-8"), meta.get("url"))
+        return Response(html, media_type="text/html; charset=utf-8", headers={
+            "Content-Security-Policy": "script-src 'none'; object-src 'none'; frame-src 'none'; "
+                                       "form-action 'none'; worker-src 'none'",
+            "Cache-Control": "no-store",
+        })
+
     @app.get("/api/docs/{doc_id}/rendered")
     def rendered(doc_id: str, voice: str | None = None):
         need(doc_id)

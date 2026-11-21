@@ -84,16 +84,123 @@ def from_html(raw_html: str, url: str | None = None, lang: str = "en") -> dict:
             "html": "\n".join(b.out), "sentences": b.sentences}
 
 
+def _get(url: str, timeout: float = 30) -> httpx.Response:
+    r = httpx.get(url, headers={"User-Agent": UA, "Accept-Language": "en,de;q=0.8"},
+                  follow_redirects=True, timeout=timeout)
+    r.raise_for_status()
+    return r
+
+
 def from_url(url: str, lang: str = "en") -> dict:
     if not re.match(r"https?://", url):
         url = "https://" + url
-    r = httpx.get(url, headers={"User-Agent": UA, "Accept-Language": "en,de;q=0.8"},
-                  follow_redirects=True, timeout=30)
-    r.raise_for_status()
+    r = _get(url)
     ctype = r.headers.get("content-type", "")
     if "pdf" in ctype:
         raise IsPdf(r.content)
-    return from_html(r.text, str(r.url), lang)
+    d = from_html(r.text, str(r.url), lang)
+    try:
+        d["original"] = snapshot(r.text, str(r.url))
+    except Exception:       # the readable version still works without the original view
+        d["original"] = r.text
+    return d
+
+
+# ---------------------------------------------------------------- original page view
+_CSS_URL = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""")
+_CSS_IMPORT = re.compile(r"""@import\s+(['"])([^'"]+)\1""")
+MAX_CSS = 3_000_000
+
+
+def absolutize_css(css: str, css_url: str) -> str:
+    """Make url(...) and @import "..." references absolute so inlined CSS keeps working."""
+    def fix(u: str) -> str:
+        u = u.strip()
+        if u.startswith(("data:", "#", "http://", "https://")):
+            return u
+        return urljoin(css_url, u)
+    css = _CSS_URL.sub(lambda m: f'url("{fix(m.group(2))}")', css)
+    return _CSS_IMPORT.sub(lambda m: f'@import "{fix(m.group(2))}"', css)
+
+
+def _base_url(doc, url: str) -> str:
+    base = doc.find(".//base[@href]")
+    return urljoin(url, base.get("href")) if base is not None else url
+
+
+def snapshot(raw_html: str, url: str, max_sheets: int = 25) -> str:
+    """Original page with its stylesheets inlined (so the look survives later site changes)."""
+    doc = lhtml.document_fromstring(raw_html)
+    base = _base_url(doc, url)
+    n = 0
+    for link in doc.xpath("//link[@href]"):
+        rel = (link.get("rel") or "").lower().split()
+        if "stylesheet" not in rel or "alternate" in rel or n >= max_sheets:
+            continue
+        href = urljoin(base, link.get("href"))
+        if not href.startswith(("http://", "https://")):
+            continue
+        n += 1
+        try:
+            r = _get(href, timeout=15)
+        except Exception:
+            link.set("href", href)
+            continue
+        if len(r.content) > MAX_CSS:
+            link.set("href", href)
+            continue
+        style = lhtml.Element("style")
+        style.text = absolutize_css(r.text, str(r.url))
+        style.set("data-qp-href", href)
+        if link.get("media"):
+            style.set("media", link.get("media"))
+        link.getparent().replace(link, style)
+    for style in doc.xpath("//style[not(@data-qp-href)]"):
+        if style.text:
+            style.text = absolutize_css(style.text, base)
+    doctype = doc.getroottree().docinfo.doctype or "<!DOCTYPE html>"
+    return doctype + "\n" + lhtml.tostring(doc, encoding="unicode")
+
+
+_DROP = ("script", "iframe", "frame", "frameset", "object", "embed", "applet", "portal")
+
+
+def prepare_original(raw_html: str, url: str | None) -> str:
+    """Make a stored original page safe and self-contained for display in the sandboxed viewer:
+    no scripts or embedded frames, links/resources resolve against the original URL, no referrer."""
+    doc = lhtml.document_fromstring(raw_html)
+    base = _base_url(doc, url or "")
+    for el in doc.xpath("|".join(f"//{t}" for t in _DROP)):
+        el.drop_tree()
+    for el in doc.xpath("//base | //meta[@charset] | //meta[@http-equiv]"):
+        el.drop_tree()
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        for a in list(el.attrib):
+            if a.lower().startswith("on"):
+                del el.attrib[a]
+        for a in ("href", "src", "action", "formaction"):
+            if el.get(a, "").strip().lower().startswith("javascript:"):
+                del el.attrib[a]
+    head = doc.find("head")
+    if head is None:
+        head = lhtml.Element("head")
+        doc.insert(0, head)
+    extra = [lhtml.Element("meta", charset="utf-8"),
+             lhtml.Element("meta", name="referrer", content="no-referrer")]
+    if base:
+        extra.insert(1, lhtml.Element("base", href=base))
+    for i, el in enumerate(extra):
+        head.insert(i, el)
+    return "<!DOCTYPE html>\n" + lhtml.tostring(doc, encoding="unicode")
+
+
+def fetch_original(url: str) -> str:
+    r = _get(url)
+    if "html" not in r.headers.get("content-type", "html"):
+        raise ValueError("keine HTML-Seite")
+    return snapshot(r.text, str(r.url))
 
 
 def from_text(text: str, title: str = "Text", lang: str = "en") -> dict:

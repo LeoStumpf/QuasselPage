@@ -32,3 +32,18 @@ def test_unknown_doc_and_bad_id(tmp_path):
     c = client(tmp_path)
     assert c.get("/api/docs/abc123").status_code == 404
     assert c.get("/api/docs/..%2F..").status_code == 404
+
+
+def test_original_view(tmp_path):
+    lib = Library(tmp_path)
+    c = TestClient(create_app(lib, start_renderer=False))
+    doc_id = lib.create({"kind": "web", "title": "T", "lang": "en", "url": "https://example.org/",
+                         "html": '<p><span class="s" data-s="0">Hi there.</span></p>',
+                         "original": "<html><body><script>x()</script><p>Hi there.</p></body></html>",
+                         "sentences": [{"id": 0, "text": "Hi there.", "para_end": True}]})
+    r = c.get(f"/api/docs/{doc_id}/original.html")
+    assert r.status_code == 200
+    assert "script-src 'none'" in r.headers["content-security-policy"]
+    assert "<script" not in r.text and "Hi there." in r.text
+    t = c.post("/api/import/text", json={"text": "No original. Really.", "title": "X"}).json()
+    assert c.get(f"/api/docs/{t['id']}/original.html").status_code == 404

@@ -69,6 +69,9 @@ class Library:
         html = extracted.pop("html", None)
         if html is not None:
             (d / "page.html").write_text(html, encoding="utf-8")
+        original = extracted.pop("original", None)
+        if original is not None:
+            (d / "original.html").write_text(original, encoding="utf-8")
         _write_json(d / "doc.json", extracted)
         meta = self.meta(doc_id) or {}
         now = time.time()

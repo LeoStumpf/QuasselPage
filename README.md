@@ -6,7 +6,9 @@ Du siehst beim Zuhören immer, wo im Dokument die Stimme gerade ist, und kannst 
 - PDF öffnen, **in einen Satz klicken → ab dort vorlesen**
 - beim Hören wird der **aktuelle Satz im PDF markiert**, die Ansicht scrollt mit
   (bei manuellem Scrollen pausiert das Mitscrollen, „Zur aktuellen Stelle“ holt es zurück)
-- Webseiten (URL) und eingefügter Text werden als lesbarer Artikel angezeigt, gleiches Prinzip
+- Webseiten (URL) werden **im Original-Look** angezeigt (gespeichertes HTML mit eingebetteten Stylesheets, ohne Skripte,
+  in einem abgeschotteten iframe); der vorgelesene Satz wird direkt dort markiert, Klick in einen Satz → ab dort vorlesen.
+  Umschaltbar auf eine „Lesefassung“ (nur Text); eingefügter Text erscheint immer als Lesefassung
 - Audio wird **im Hintergrund vorgerendert**; was noch fehlt, wird beim Abspielen sofort mit Vorrang erzeugt
 - Tempo 0,75–2×, ±15 s, Satz vor/zurück, Tastatur (Leertaste, ←/→, +/−), Medientasten
 - merkt sich pro Dokument die letzte Stelle („Weiterhören“)
