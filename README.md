@@ -10,6 +10,8 @@ Du siehst beim Zuhören immer, wo im Dokument die Stimme gerade ist, und kannst 
 - Audio wird **im Hintergrund vorgerendert**; was noch fehlt, wird beim Abspielen sofort mit Vorrang erzeugt
 - Tempo 0,75–2×, ±15 s, Satz vor/zurück, Tastatur (Leertaste, ←/→, +/−), Medientasten
 - merkt sich pro Dokument die letzte Stelle („Weiterhören“)
+- Reader für Querformat-Bildschirme: Seitenvorschauen links, PDF in der Mitte, rechts Player, Tempo, Stimme
+  und Inhaltsverzeichnis (aus der PDF-Gliederung bzw. den Überschriften); Player wahlweise **rechts oder unten**
 
 Alles läuft auf dem eigenen Rechner: Sprachausgabe mit **[KittenTTS 2 nano](https://huggingface.co/KittenML/kitten-tts-2-nano)**
 (17 M Parameter, Apache-2.0, nur CPU, Standardstimme „Danny“; auf einem i7-8550U ca. 3–4× schneller als Echtzeit), PDF-Anzeige mit lokal mitgeliefertem **pdf.js**. Nach dem ersten Modell-Download macht
@@ -47,6 +49,9 @@ spielen Satz für Satz (nächster ist vorgeladen) ⇒ Sync ist exakt, kein Whisp
 
 Daten liegen unter `~/.local/share/QuasselPage/` (Windows: `%LOCALAPPDATA%\QuasselPage`): je Dokument ein Ordner
 mit Original, `doc.json`, `meta.json` und dem Audio-Cache.
+
+Oberfläche: helles „Atelier Smaragd“-Design, Schriften **Inter** und **Space Grotesk** (SIL OFL 1.1, lokal unter
+`web/vendor/fonts/`), App-Icon `web/icon.svg`.
 
 ## Tests
 

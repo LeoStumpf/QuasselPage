@@ -18,13 +18,53 @@ const post = (path, body) => api(path, {
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
+const RATES = [0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+const CHARS_PER_SEC = 14;
+const ICON_PLAY = '<svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 4v16l13-8z"/></svg>';
+const ICON_PAUSE = '<svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/></svg>';
+
 let player, mode, sentences, meta, settings;
 let follow = true;
+let suffixChars = [];
+let toc = [];            // [{title, depth, sid, page}]
+
+// ----------------------------------------------------------------- player position (right / bottom)
+const narrow = matchMedia("(max-width: 960px)");
+let playerPos = store.get("quasselpage.playerpos", "right") === "bottom" ? "bottom" : "right";
+
+function placePlayer() {
+  const pos = narrow.matches ? "bottom" : playerPos;
+  const pl = $("#pl");
+  if (pos === "bottom") $("#dock").appendChild(pl); else $("#slot").appendChild(pl);
+  document.querySelectorAll(".playerpos button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.pos === playerPos)));
+}
+document.querySelectorAll(".playerpos button").forEach((b) => b.addEventListener("click", () => {
+  playerPos = b.dataset.pos;
+  store.set("quasselpage.playerpos", playerPos);
+  placePlayer();
+}));
+narrow.addEventListener("change", placePlayer);
+placePlayer();
+
+$("#sidetoggle").addEventListener("click", () => {
+  const open = !$("#side").classList.contains("open");
+  $("#side").classList.toggle("open", open);
+  $("#sidetoggle").setAttribute("aria-expanded", String(open));
+});
+document.addEventListener("click", (e) => {
+  if (!narrow.matches || !$("#side").classList.contains("open")) return;
+  if (!e.target.closest("#side, #sidetoggle")) {
+    $("#side").classList.remove("open");
+    $("#sidetoggle").setAttribute("aria-expanded", "false");
+  }
+});
 
 // ----------------------------------------------------------------- PDF view
 const pdfView = {
   pages: [], scale: 1, zoom: parseFloat(store.get("quasselpage.zoom", "1")) || 1,
+  fit: store.get("quasselpage.fit", "width") === "page" ? "page" : "width",
   pageRects: new Map(), curEls: [], hovEls: [], hovSid: -1, pdf: null, observer: null,
+  thumbs: [], visPage: -1, curPage: -1,
 
   async init(doc) {
     const pdfjs = await import("/static/vendor/pdfjs/pdf.min.mjs");
@@ -57,6 +97,7 @@ const pdfView = {
       const div = document.createElement("div");
       div.className = "page";
       div.dataset.p = i;
+      div.setAttribute("aria-label", `Seite ${i + 1}`);
       div.innerHTML = `<canvas></canvas><div class="hl"></div><span class="pno">${i + 1}</span>`;
       wrap.appendChild(div);
       const pg = { i, div, canvas: div.firstChild, hl: div.children[1], rendered: 0, task: null, visible: false };
@@ -66,18 +107,146 @@ const pdfView = {
       div.addEventListener("mouseleave", () => this.clearHover());
       this.observer.observe(div);
     });
+    this.initThumbs();
     this.layout();
     new ResizeObserver(() => this.layout()).observe(view);
     $("#zin").onclick = () => this.setZoom(this.zoom * 1.15);
     $("#zout").onclick = () => this.setZoom(this.zoom / 1.15);
+    $("#fitw").onclick = () => this.setFit("width");
+    $("#fitp").onclick = () => this.setFit("page");
+    let raf = 0;
+    view.addEventListener("scroll", () => {
+      if (!raf) raf = requestAnimationFrame(() => { raf = 0; this.onScroll(); });
+    }, { passive: true });
+    this.loadOutline();   // async, fills the table of contents when ready
   },
 
+  // ---- thumbnails
+  initThumbs() {
+    const rail = $("#thumbs");
+    rail.hidden = false;
+    const tobs = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const t = this.thumbs[e.target.dataset.p];
+        if (e.isIntersecting) this.renderThumb(t); else if (t.done) { t.canvas.width = 0; t.done = false; }
+      }
+    }, { root: rail, rootMargin: "600px 0px" });
+    this.sizes.forEach((sz, i) => {
+      const b = document.createElement("button");
+      b.className = "thumb";
+      b.dataset.p = i;
+      b.setAttribute("aria-label", `Zu Seite ${i + 1}`);
+      b.innerHTML = `<span class="tp" style="height:${Math.round((62 * sz.h) / sz.w)}px"><canvas></canvas></span>${i + 1}`;
+      b.onclick = () => { stopFollowing(true); view.scrollTo({ top: this.pages[i].div.offsetTop - 40, behavior: "smooth" }); };
+      rail.appendChild(b);
+      this.thumbs.push({ i, b, canvas: b.querySelector("canvas"), done: false, busy: false });
+      tobs.observe(b);
+    });
+  },
+
+  async renderThumb(t) {
+    if (t.done || t.busy) return;
+    t.busy = true;
+    try {
+      const page = await this.pdf.getPage(t.i + 1);
+      const sz = this.sizes[t.i];
+      const vp = page.getViewport({ scale: (62 * Math.min(window.devicePixelRatio || 1, 2)) / sz.w });
+      const c = document.createElement("canvas");
+      c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+      await page.render({ canvas: c, canvasContext: c.getContext("2d"), viewport: vp }).promise;
+      t.canvas.replaceWith(c);
+      t.canvas = c;
+      t.done = true;
+    } catch { /* ignore */ }
+    t.busy = false;
+  },
+
+  markCurrentPage(p) {
+    if (p === this.curPage) return;
+    this.thumbs[this.curPage]?.b.classList.remove("cur");
+    this.curPage = p;
+    const t = this.thumbs[p];
+    if (!t) return;
+    t.b.classList.add("cur");
+    const rail = $("#thumbs");
+    const top = t.b.offsetTop - rail.offsetTop;
+    if (top < rail.scrollTop || top + t.b.offsetHeight > rail.scrollTop + rail.clientHeight) {
+      rail.scrollTo({ top: top - rail.clientHeight / 3, behavior: "smooth" });
+    }
+  },
+
+  onScroll() {
+    const a = this.anchor();
+    if (!a) return;
+    const p = a.page.i;
+    if (p !== this.visPage) {
+      this.thumbs[this.visPage]?.b.classList.remove("vis");
+      this.visPage = p;
+      this.thumbs[p]?.b.classList.add("vis");
+    }
+    const chip = $("#pagechip");
+    chip.hidden = false;
+    chip.textContent = `Seite ${p + 1} / ${this.sizes.length}`;
+  },
+
+  // ---- outline → table of contents
+  async loadOutline() {
+    let outline;
+    try { outline = await this.pdf.getOutline(); } catch { return; }
+    if (!outline?.length) return;
+    const items = [];
+    const walk = async (nodes, depth) => {
+      for (const n of nodes) {
+        if (items.length > 400) return;
+        const pos = await this.resolveDest(n.dest).catch(() => null);
+        if (pos) items.push({ title: (n.title || "").trim() || "…", depth, ...pos });
+        if (n.items?.length && depth < 2) await walk(n.items, depth + 1);
+      }
+    };
+    await walk(outline, 0);
+    for (const it of items) it.sid = this.firstSentenceAt(it.page, it.y);
+    setToc(items.filter((it) => it.sid != null));
+  },
+
+  async resolveDest(dest) {
+    if (!dest) return null;
+    const explicit = typeof dest === "string" ? await this.pdf.getDestination(dest) : dest;
+    if (!Array.isArray(explicit)) return null;
+    const ref = explicit[0];
+    const page = typeof ref === "number" ? ref : await this.pdf.getPageIndex(ref);
+    const sz = this.sizes[page];
+    if (!sz) return null;
+    // XYZ / FitH / FitBH carry a top coordinate (PDF space, origin bottom-left)
+    let top = null;
+    const kind = explicit[1]?.name;
+    if (kind === "XYZ") top = explicit[3];
+    else if (kind === "FitH" || kind === "FitBH") top = explicit[2];
+    const y = typeof top === "number" ? Math.max(0, sz.h - top) : 0;
+    return { page, y };
+  },
+
+  firstSentenceAt(page, y) {
+    for (const s of sentences) {
+      const r = s.rects[0];
+      if (!r) continue;
+      if (r[0] > page || (r[0] === page && r[4] >= y - 2)) return s.id;
+    }
+    return null;
+  },
+
+  // ---- zoom
   setZoom(z) {
     const anchor = this.anchor();
-    this.zoom = Math.max(0.4, Math.min(4, z));
+    this.zoom = Math.max(0.3, Math.min(4, z));
     store.set("quasselpage.zoom", String(this.zoom));
     this.layout();
     if (anchor) view.scrollTop = anchor.page.div.offsetTop + anchor.frac * anchor.page.div.offsetHeight - 16;
+  },
+
+  setFit(fit) {
+    this.fit = fit;
+    store.set("quasselpage.fit", fit);
+    this.setZoom(1);
   },
 
   anchor() {
@@ -88,8 +257,13 @@ const pdfView = {
 
   layout() {
     const maxW = Math.max(...this.sizes.map((s) => s.w));
-    const avail = Math.min(view.clientWidth - 24, 980);
-    const scale = (avail / maxW) * this.zoom;
+    const maxH = Math.max(...this.sizes.map((s) => s.h));
+    const availW = Math.min(view.clientWidth - 40, 1100);
+    const base = this.fit === "page" ? Math.min(availW / maxW, (view.clientHeight - 72) / maxH) : availW / maxW;
+    const scale = Math.max(0.1, base * this.zoom);
+    $("#zval").textContent = `${Math.round(this.zoom * 100)} %`;
+    $("#fitw").setAttribute("aria-pressed", String(this.fit === "width" && Math.abs(this.zoom - 1) < 0.001));
+    $("#fitp").setAttribute("aria-pressed", String(this.fit === "page" && Math.abs(this.zoom - 1) < 0.001));
     if (Math.abs(scale - this.scale) < 0.001 && this.pages[0]?.div.style.width) return;
     this.scale = scale;
     for (const pg of this.pages) {
@@ -98,6 +272,7 @@ const pdfView = {
       pg.div.style.height = `${sz.h * scale}px`;
       if (pg.visible) this.render(pg); else this.unrender(pg);
     }
+    this.onScroll();
   },
 
   async render(pg) {
@@ -188,7 +363,10 @@ const pdfView = {
     this.curEls.forEach((el) => el.remove());
     this.clearHover();
     this.curEls = this.draw(sid);
+    this.markCurrentPage(this.pageOf(sid));
   },
+
+  pageOf(sid) { return sentences[sid]?.rects[0]?.[0] ?? sentences[sid]?.page ?? 0; },
 
   // y position (in view scroll coordinates) of the sentence start
   offsetOf(sid) {
@@ -215,6 +393,18 @@ const webView = {
     });
     $("#zoomgrp").hidden = true;
     $("#pdfdark").hidden = true;
+    // headings → table of contents
+    const spans = [...art.querySelectorAll(".s")];
+    const items = [];
+    for (const h of art.querySelectorAll("h1, h2, h3")) {
+      const inside = h.querySelector(".s");
+      const next = inside || spans.find((el) => h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+      if (!next) continue;
+      items.push({ title: h.textContent.trim(), depth: Math.max(0, +h.tagName[1] - 1), sid: +next.dataset.s, page: null });
+    }
+    const minDepth = Math.min(...items.map((i) => i.depth));
+    items.forEach((i) => { i.depth -= minDepth; });
+    if (items.length > 1) setToc(items);
   },
   cur: null,
   show(sid) {
@@ -228,6 +418,67 @@ const webView = {
   },
 };
 
+// ----------------------------------------------------------------- table of contents
+function setToc(items) {
+  toc = items;
+  const box = $("#toc");
+  box.innerHTML = "";
+  items.forEach((it, i) => {
+    const b = document.createElement("button");
+    b.className = `d${Math.min(it.depth, 2)}`;
+    b.dataset.i = i;
+    const t = document.createElement("span");
+    t.textContent = it.title;
+    b.appendChild(t);
+    if (it.page != null) {
+      const pg = document.createElement("span");
+      pg.className = "pg";
+      pg.textContent = it.page + 1;
+      b.appendChild(pg);
+    }
+    b.onclick = () => jumpTo(it.sid);
+    box.appendChild(b);
+  });
+  $("#tocsec").hidden = !items.length;
+  updateChapter();
+}
+
+function chapterOf(sid) {
+  let cur = -1;
+  for (let i = 0; i < toc.length; i++) if (toc[i].sid <= sid) cur = i;
+  return cur;
+}
+
+let curChapter = -2;
+function updateChapter() {
+  if (!player) return;
+  const c = chapterOf(player.sid);
+  const sub = $("#sub");
+  const parts = [];
+  if (c >= 0) parts.push(toc[c].title);
+  if (mode === "pdf") parts.push(`Seite ${pdfView.pageOf(player.sid) + 1} von ${meta.pages}`);
+  else {
+    let host = "Text";
+    try { if (meta.url) host = new URL(meta.url).hostname.replace(/^www\./, ""); } catch { host = "Webseite"; }
+    parts.push(host);
+  }
+  sub.textContent = parts.join(" · ");
+  $("#nowchap").textContent = c >= 0 ? `Jetzt · ${toc[c].title}` : "Jetzt";
+  if (c === curChapter) return;
+  curChapter = c;
+  document.querySelectorAll("#toc button").forEach((b) => {
+    if (+b.dataset.i === c) b.setAttribute("aria-current", "true"); else b.removeAttribute("aria-current");
+  });
+}
+
+function jumpTo(sid) {
+  sid = Math.max(0, Math.min(sentences.length - 1, sid));
+  follow = true;
+  if (player.playing) player.playFrom(sid); else player.select(sid);
+  scrollToSentence(sid);
+  updateFollow();
+}
+
 // ----------------------------------------------------------------- shared
 let view_;
 
@@ -240,13 +491,13 @@ function scrollToSentence(sid, smooth = true) {
 }
 
 function updateFollow() {
-  $("#follow").classList.toggle("show", !follow && player?.playing);
+  $("#follow").classList.toggle("show", !follow && !!player?.playing);
 }
 
-function stopFollowing() {
-  if (player?.playing && follow && settings.autoscroll) { follow = false; updateFollow(); }
+function stopFollowing(force = false) {
+  if (player?.playing && follow && (settings.autoscroll || force)) { follow = false; updateFollow(); }
 }
-["wheel", "touchmove"].forEach((ev) => view.addEventListener(ev, stopFollowing, { passive: true }));
+["wheel", "touchmove"].forEach((ev) => view.addEventListener(ev, () => stopFollowing(), { passive: true }));
 view.addEventListener("mousedown", (e) => { if (e.target === view) stopFollowing(); }); // scrollbar drag
 $("#follow").onclick = () => { follow = true; updateFollow(); scrollToSentence(player.sid); };
 
@@ -257,24 +508,57 @@ function savePosition(sid) {
     { sid, voice: player.voice, playing: player.playing }).catch(() => {}), 600);
 }
 
+function fmtRemain(sid) {
+  const sec = (suffixChars[sid] || 0) / CHARS_PER_SEC / (player.rate || 1);
+  if (sec < 60) return sec > 0 ? "noch < 1 min" : "";
+  const m = Math.round(sec / 60);
+  return m < 60 ? `noch ca. ${m} min` : `noch ca. ${Math.floor(m / 60)} h ${m % 60} min`;
+}
+
 let rendered = 0;
 function showState(s = player.state) {
+  const n = sentences.length;
   const st = $("#state");
-  const pos = `Satz ${player.sid + 1} / ${sentences.length}`;
-  const prog = rendered < sentences.length ? ` · Audio ${Math.round((100 * rendered) / sentences.length)} %` : "";
-  if (s === "waiting") st.innerHTML = `<span class="spinner"></span> Audio wird erzeugt …`;
+  const pos = `Satz ${player.sid + 1} / ${n}`;
+  if (s === "waiting") st.innerHTML = '<span class="spinner"></span> Audio wird erzeugt …';
   else if (s === "error") st.textContent = "Satz konnte nicht erzeugt werden – übersprungen";
   else if (s === "ended") st.textContent = "Ende erreicht";
-  else st.textContent = pos + prog;
-  $("#play").textContent = player.playing ? "⏸" : "▶";
+  else st.textContent = pos;
+  $("#remain").textContent = fmtRemain(player.sid);
+  const play = $("#play");
+  play.innerHTML = player.playing ? ICON_PAUSE : ICON_PLAY;
+  play.setAttribute("aria-label", player.playing ? "Pause" : "Abspielen");
+  $("#ph").style.width = `${n > 1 ? (100 * player.sid) / (n - 1) : 0}%`;
+  $("#pr").style.width = `${(100 * Math.min(rendered, n)) / n}%`;
+  $("#pbar").title = `gehört bis Satz ${player.sid + 1} · Audio ${Math.round((100 * Math.min(rendered, n)) / n)} % vorgerendert – klicken zum Springen`;
+  $("#nowtext").textContent = sentences[player.sid]?.text || "";
+  updateChapter();
   updateFollow();
 }
 
 async function pollProgress() {
   try {
     const d = (await api("/api/docs")).find((x) => x.id === docId);
-    if (d) { rendered = d.rendered; if (!player.playing) showState(); }
+    if (d) { rendered = d.rendered; showState(); }
   } catch { /* server gone */ }
+}
+
+function setupRates(current) {
+  const box = $("#rates");
+  box.innerHTML = "";
+  for (const r of RATES) {
+    const b = document.createElement("button");
+    b.textContent = `${String(r).replace(".", ",")}×`;
+    b.dataset.r = r;
+    b.setAttribute("aria-pressed", String(r === current));
+    b.onclick = () => {
+      player.setRate(r);
+      box.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", String(+x.dataset.r === r)));
+      post("/api/settings", { rate: r }).catch(() => {});
+      showState();
+    };
+    box.appendChild(b);
+  }
 }
 
 async function main() {
@@ -282,12 +566,15 @@ async function main() {
   meta = m; settings = s; sentences = doc.sentences; mode = doc.kind;
   document.title = `${meta.title} – QuasselPage`;
   $("#title").textContent = meta.title;
+  $("#title").title = meta.title;
   rendered = meta.rendered;
   if (meta.scanned) {
     const b = $("#banner");
     b.hidden = false;
     b.textContent = "Diese PDF enthält kaum Text (vermutlich gescannt) – nur der erkannte Text wird vorgelesen.";
   }
+  suffixChars = new Array(sentences.length + 1).fill(0);
+  for (let i = sentences.length - 1; i >= 0; i--) suffixChars[i] = suffixChars[i + 1] + sentences[i].text.length;
 
   // voices
   const vs = $("#voice");
@@ -298,7 +585,7 @@ async function main() {
     vs.appendChild(g);
   }
   vs.value = settings.voice;
-  $("#rate").value = String(settings.rate);
+  setupRates(settings.rate);
   $("#autoscroll").checked = settings.autoscroll;
   const dark = store.get("quasselpage.pdfdark", "0") === "1";
   document.documentElement.dataset.pdfdark = dark ? "1" : "0";
@@ -326,15 +613,15 @@ async function main() {
   $("#next").onclick = () => player.next();
   $("#back15").onclick = () => player.seek(-15);
   $("#fwd15").onclick = () => player.seek(15);
-  $("#rate").onchange = (e) => {
-    const r = parseFloat(e.target.value);
-    player.setRate(r);
-    post("/api/settings", { rate: r });
+  $("#pbar").onclick = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    jumpTo(Math.round(((e.clientX - r.left) / r.width) * (sentences.length - 1)));
   };
   vs.onchange = async (e) => {
     settings = await post("/api/settings", { voice: e.target.value });
     player.setVoice(settings.voice);
     post(`/api/docs/${docId}/position`, { sid: player.sid, voice: player.voice, playing: true });
+    pollProgress();
   };
   $("#autoscroll").onchange = async (e) => {
     settings = await post("/api/settings", { autoscroll: e.target.checked });
